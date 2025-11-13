@@ -1,0 +1,147 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.virtualenv/
+
+# UV (Python package manager)
+.uv/
+uv.lock
+
+# PyTorch model checkpoints (large files)
+*.pt
+*.pth
+*.ckpt
+checkpoints/**/*.pt
+checkpoints/**/*.pth
+
+# Keep checkpoint directory structure but ignore model files
+!checkpoints/.gitkeep
+
+# Training outputs
+logs/
+runs/
+wandb/
+*.log
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Matplotlib/Plots (keep important ones, ignore temp)
+*.png
+!figures/*.png
+!proposal/**/*.png
+
+# LaTeX temporary files
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.out
+*.nav
+*.snm
+*.vrb
+*.log
+*.lot
+*.lof
+*.idx
+*.ilg
+*.ind
+proposal/**/*.aux
+proposal/**/*.log
+proposal/**/*.out
+proposal/**/*.nav
+proposal/**/*.snm
+proposal/**/*.synctex.gz
+
+# Keep the final PDFs
+!proposal/**/*.pdf
+
+# SUMO outputs
+*.rou.xml
+*.tripinfo.xml
+*.xml
+!demo.sumocfg
+!*.net.xml
+!*.rou.xml.template
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Lean proof files (keep source, ignore build)
+lean_proof/_build/
+lean_proof/lake-packages/
+lean_proof/.lake/
+
+# Experimental data
+experiments/
+data/
+*.csv
+*.npy
+*.npz
+
+# Screenshots (selective)
+sumo_screenshots/
+screenshots/
+
+# Keep README and docs
+!README.md
+!CLAUDE.md
+!docs/**
+
+# Keep important proposal images
+!proposal/figures/*.png
+!proposal/*.png
+
+
+CLAUDE.md
