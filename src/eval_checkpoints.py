@@ -6,6 +6,7 @@ This script:
 2. Runs evaluation episodes
 3. Computes statistics (mean, std, min/max returns, collision rates)
 4. Compares different tau values
+5. Saves GIFs of agent behavior
 """
 
 import gymnasium as gym
@@ -14,9 +15,65 @@ import torch
 from pathlib import Path
 import matplotlib.pyplot as plt
 from collections import defaultdict
+from PIL import Image
 
 from src.algorithms.distributional_rqe_ppo import DistributionalRQE_PPO, DistributionalRQEPPOConfig
 from src.envs.risky_cartpole import register_risky_envs
+
+
+def record_episode_as_gif(env, agent, output_path, max_steps=500):
+    """
+    Record a single episode and save as GIF
+
+    Args:
+        env: Gymnasium environment (must be created with render_mode='rgb_array')
+        agent: Trained agent
+        output_path: Path to save GIF file
+        max_steps: Maximum steps per episode
+
+    Returns:
+        episode_reward: Total reward
+        episode_length: Episode length
+    """
+    frames = []
+    obs, _ = env.reset()
+    episode_reward = 0
+    episode_length = 0
+
+    for step in range(max_steps):
+        # Render current frame
+        frame = env.render()
+        frames.append(frame)
+
+        # Select action (deterministic for evaluation)
+        action, _, _ = agent.select_action(obs, deterministic=True)
+
+        # Step environment
+        next_obs, reward, terminated, truncated, info = env.step(action)
+
+        episode_reward += reward
+        episode_length += 1
+
+        obs = next_obs
+
+        if terminated or truncated:
+            # Add a few more frames at the end
+            for _ in range(10):
+                frame = env.render()
+                frames.append(frame)
+            break
+
+    # Convert frames to PIL Images and save as GIF
+    images = [Image.fromarray(frame) for frame in frames]
+    images[0].save(
+        output_path,
+        save_all=True,
+        append_images=images[1:],
+        duration=50,  # 50ms per frame = 20 fps
+        loop=0
+    )
+
+    return episode_reward, episode_length
 
 
 def evaluate_agent(env, agent, n_episodes=100, max_steps=500, render=False):
@@ -152,6 +209,14 @@ def main():
         print(f"  5th/95th %ile:   {stats['percentile_5']:.2f} / {stats['percentile_95']:.2f}")
         print(f"  Mean length:     {stats['mean_length']:.1f}")
         print(f"  Success rate:    {stats['success_rate']*100:.1f}%")
+
+        # Record GIF
+        print(f"  Recording GIF...")
+        gif_env = gym.make('RiskyCartPole-medium-v0', render_mode='rgb_array')
+        gif_path = checkpoint_dir / f"agent_tau{tau}_demo.gif"
+        episode_reward, episode_length = record_episode_as_gif(gif_env, agent, gif_path, max_steps=500)
+        gif_env.close()
+        print(f"  ✓ Saved GIF: {gif_path.name} (reward={episode_reward:.1f}, length={episode_length})")
 
     # Create comparison plots
     print("\n" + "=" * 80)
