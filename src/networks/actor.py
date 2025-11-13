@@ -58,7 +58,7 @@ class ActorNetwork(nn.Module):
         """Orthogonal initialization (common in PPO)"""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=0.01)
+                nn.init.orthogonal_(module.weight, gain=1.0)
                 nn.init.constant_(module.bias, 0.0)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:

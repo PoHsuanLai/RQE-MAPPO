@@ -26,13 +26,16 @@ class DistributionalRQEPPOConfig:
 
     # RQE parameters
     tau: float = 1.0  # Risk aversion (lower = more risk-averse)
-    epsilon: float = 0.01  # Bounded rationality (entropy coefficient, FIXED!)
+    epsilon: float = 0.01  # Bounded rationality (entropy coefficient)
+    epsilon_decay: bool = False  # Whether to decay entropy over time (like standard PPO)
+    epsilon_min: float = 0.0  # Minimum entropy coefficient (if decay enabled)
+    epsilon_decay_rate: float = 0.99  # Decay rate per update (if decay enabled)
     risk_measure: str = "entropic"  # "entropic", "cvar", "mean_variance"
 
     # Distributional parameters
     n_atoms: int = 51  # Number of atoms in categorical distribution
-    v_min: float = -10.0  # Minimum support value
-    v_max: float = 10.0  # Maximum support value
+    v_min: float = 0.0  # Minimum support value (task-dependent, adjust for your env)
+    v_max: float = 600.0  # Maximum support value (task-dependent, adjust for your env)
 
     # Network architecture
     hidden_dims: list = field(default_factory=lambda: [64, 64])
@@ -40,7 +43,7 @@ class DistributionalRQEPPOConfig:
 
     # PPO parameters
     lr_actor: float = 3e-4
-    lr_critic: float = 1e-3
+    lr_critic: float = 3e-4  # Match actor LR for stability
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_param: float = 0.2
@@ -66,6 +69,9 @@ class DistributionalRQE_PPO:
 
     def __init__(self, config: DistributionalRQEPPOConfig):
         self.config = config
+
+        # Track current epsilon (for decay)
+        self.current_epsilon = config.epsilon
 
         # Create actor network (standard)
         self.actor = ActorNetwork(
@@ -200,12 +206,12 @@ class DistributionalRQE_PPO:
         Returns:
             metrics: Training metrics
         """
-        # Move buffer to device
-        observations = buffer['observations'].to(self.device)
-        actions = buffer['actions'].to(self.device)
-        rewards = buffer['rewards'].to(self.device)
-        dones = buffer['dones'].to(self.device)
-        log_probs_old = buffer['log_probs_old'].to(self.device)
+        # Move buffer to device (do this ONCE, not per minibatch)
+        observations = buffer['observations'].to(self.device, non_blocking=True)
+        actions = buffer['actions'].to(self.device, non_blocking=True)
+        rewards = buffer['rewards'].to(self.device, non_blocking=True)
+        dones = buffer['dones'].to(self.device, non_blocking=True)
+        log_probs_old = buffer['log_probs_old'].to(self.device, non_blocking=True)
 
         # Compute advantages
         advantages, returns = self.compute_gae(rewards, observations, dones)
@@ -255,10 +261,18 @@ class DistributionalRQE_PPO:
                 actor_losses.append(actor_loss)
                 entropy_losses.append(entropy_loss)
 
+        # Decay epsilon if enabled
+        if self.config.epsilon_decay:
+            self.current_epsilon = max(
+                self.config.epsilon_min,
+                self.current_epsilon * self.config.epsilon_decay_rate
+            )
+
         return {
             'actor_loss': np.mean(actor_losses),
             'critic_loss': np.mean(critic_losses),
-            'entropy': np.mean(entropy_losses)
+            'entropy': np.mean(entropy_losses),
+            'epsilon': self.current_epsilon
         }
 
     def _update_critic_distributional(
@@ -282,9 +296,18 @@ class DistributionalRQE_PPO:
         Returns:
             loss: Scalar loss value
         """
-        # Get next observations (shifted by 1)
+        # Get next observations (properly handling episode boundaries)
+        # VECTORIZED: No Python loops!
+
+        # Shift observations by 1 to get next_observations
         next_observations = torch.roll(observations, shifts=-1, dims=0)
-        next_observations[-1] = observations[-1]  # Last next_obs doesn't matter
+
+        # Detect episode boundaries: if dones[i] == 1, then next_observations[i]
+        # should NOT be used for bootstrapping (gamma=0 handles this in project_distribution)
+        # For terminal states and last position, set next_obs = obs (won't affect loss since gamma=0)
+        terminal_mask = dones.bool()
+        next_observations[terminal_mask] = observations[terminal_mask]
+        next_observations[-1] = observations[-1]  # Last position has no valid next
 
         # Get current distribution
         current_probs = self.critic(observations)  # [batch, n_atoms]
@@ -294,6 +317,7 @@ class DistributionalRQE_PPO:
             next_probs = self.critic(next_observations)  # [batch, n_atoms]
 
             # Project: T(Z) = r + γZ
+            # The project_distribution function will set gamma=0 for terminal states
             target_probs = project_distribution(
                 next_probs,
                 rewards,
@@ -375,8 +399,8 @@ class DistributionalRQE_PPO:
         surr2 = torch.clamp(ratio, 1 - self.config.clip_param, 1 + self.config.clip_param) * advantages
         actor_loss = -torch.min(surr1, surr2).mean()
 
-        # FIXED entropy bonus (KEY for RQE: don't anneal!)
-        entropy_bonus = -self.config.epsilon * entropy.mean()
+        # Entropy bonus (with optional decay if epsilon_decay=True)
+        entropy_bonus = -self.current_epsilon * entropy.mean()
 
         # Total loss
         total_loss = actor_loss + entropy_bonus

@@ -1,8 +1,8 @@
 """
-Train single-agent Distributional RQE-PPO
+Train single-agent Distributional RQE-PPO using Stable Baselines3 infrastructure
 
-Test script for comparing risk-averse vs risk-neutral policies
-on risky environments.
+Uses SB3's highly optimized PPO implementation with our distributional critic
+for risk-averse learning. Much faster than our custom implementation!
 """
 
 import gymnasium as gym
@@ -12,94 +12,65 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-from src.algorithms.distributional_rqe_ppo import DistributionalRQE_PPO, DistributionalRQEPPOConfig
+from src.algorithms.rqe_ppo_sb3 import RQE_PPO_SB3
+from src.algorithms.true_rqe_ppo_sb3 import TrueRQE_PPO_SB3
 from src.envs.risky_cartpole import register_risky_envs
+from stable_baselines3.common.callbacks import BaseCallback
 
 
-def collect_rollout(env, agent, max_steps=500):
+class EvalCallback(BaseCallback):
     """
-    Collect a single episode rollout
-
-    Returns:
-        buffer: Dictionary with trajectory data
-        episode_reward: Total reward
-        episode_length: Episode length
+    Callback for evaluating and logging during training
     """
-    observations = []
-    actions = []
-    rewards = []
-    dones = []
-    log_probs = []
+    def __init__(self, eval_env, eval_freq=10, n_eval_episodes=10, verbose=0):
+        super().__init__(verbose)
+        self.eval_env = eval_env
+        self.eval_freq = eval_freq
+        self.n_eval_episodes = n_eval_episodes
+        self.evaluations = []
 
-    obs, _ = env.reset()
-    episode_reward = 0
-    episode_length = 0
+    def _on_step(self) -> bool:
+        # Evaluate every eval_freq rollouts (n_steps timesteps)
+        if self.n_calls % (self.eval_freq * self.model.n_steps) == 0:
+            iteration = self.n_calls // self.model.n_steps
 
-    for step in range(max_steps):
-        # Select action
-        action, log_prob, value = agent.select_action(obs, deterministic=False)
+            # Evaluate
+            episode_rewards = []
+            episode_lengths = []
 
-        # Step environment
-        next_obs, reward, terminated, truncated, info = env.step(action)
+            for _ in range(self.n_eval_episodes):
+                obs, _ = self.eval_env.reset()
+                terminated = False
+                truncated = False
+                episode_reward = 0
+                episode_length = 0
 
-        # Store transition
-        observations.append(obs)
-        actions.append(action)
-        rewards.append(reward)
-        dones.append(float(terminated))
-        log_probs.append(log_prob)
+                while not (terminated or truncated):
+                    action, _ = self.model.predict(obs, deterministic=True)
+                    obs, reward, terminated, truncated, info = self.eval_env.step(action)
+                    episode_reward += reward
+                    episode_length += 1
 
-        episode_reward += reward
-        episode_length += 1
+                episode_rewards.append(episode_reward)
+                episode_lengths.append(episode_length)
 
-        obs = next_obs
+            mean_reward = np.mean(episode_rewards)
+            std_reward = np.std(episode_rewards)
+            mean_length = np.mean(episode_lengths)
 
-        if terminated or truncated:
-            break
+            self.evaluations.append({
+                'iteration': iteration,
+                'mean_reward': mean_reward,
+                'std_reward': std_reward,
+                'mean_length': mean_length,
+            })
 
-    # Convert to tensors
-    buffer = {
-        'observations': torch.FloatTensor(np.array(observations)),
-        'actions': torch.LongTensor(actions),
-        'rewards': torch.FloatTensor(rewards),
-        'dones': torch.FloatTensor(dones),
-        'log_probs_old': torch.FloatTensor(log_probs)
-    }
+            if self.verbose > 0:
+                print("-" * 60)
+                print(f"EVAL | Iteration {iteration} | Reward: {mean_reward:.2f} ± {std_reward:.2f} | Length: {mean_length:.1f}")
+                print("-" * 60)
 
-    return buffer, episode_reward, episode_length
-
-
-def evaluate(env, agent, n_episodes=10, deterministic=True):
-    """
-    Evaluate agent performance
-
-    Returns:
-        mean_reward: Average episode reward
-        std_reward: Std of episode rewards
-        mean_length: Average episode length
-    """
-    rewards = []
-    lengths = []
-
-    for _ in range(n_episodes):
-        obs, _ = env.reset()
-        episode_reward = 0
-        episode_length = 0
-
-        while True:
-            action, _, _ = agent.select_action(obs, deterministic=deterministic)
-            obs, reward, terminated, truncated, info = env.step(action)
-
-            episode_reward += reward
-            episode_length += 1
-
-            if terminated or truncated:
-                break
-
-        rewards.append(episode_reward)
-        lengths.append(episode_length)
-
-    return np.mean(rewards), np.std(rewards), np.mean(lengths)
+        return True
 
 
 def train(
@@ -107,211 +78,276 @@ def train(
     tau: float = 1.0,
     epsilon: float = 0.01,
     risk_measure: str = "entropic",
-    n_iterations: int = 500,
-    steps_per_iteration: int = 2048,
-    eval_interval: int = 50,
+    total_timesteps: int = 1_000_000,
+    n_steps: int = 2048,
+    eval_interval: int = 10,
     save_dir: str = "checkpoints/single_agent",
-    seed: int = 42
+    seed: int = 42,
+    use_true_rqe: bool = False,
+    normalize_weights: bool = True,
+    weight_clip: float = 10.0,
+    use_clipping: bool = True
 ):
     """
-    Train single-agent Distributional RQE-PPO
+    Train single-agent Distributional RQE-PPO using SB3 infrastructure
 
     Args:
         env_name: Gym environment name
         tau: Risk aversion (lower = more risk-averse)
         epsilon: Bounded rationality (entropy coefficient)
         risk_measure: "entropic", "cvar", "mean_variance"
-        n_iterations: Number of training iterations
-        steps_per_iteration: Steps per iteration
-        eval_interval: Evaluate every N iterations
+        total_timesteps: Total training timesteps
+        n_steps: Steps per rollout
+        eval_interval: Evaluate every N rollouts
         save_dir: Directory to save checkpoints
         seed: Random seed
+        use_true_rqe: If True, use true RQE gradient with exponential weights
+        normalize_weights: Normalize importance weights (only for true RQE)
+        weight_clip: Clip extreme weights (only for true RQE)
+        use_clipping: Use PPO clipping (only for true RQE)
     """
-    print("=" * 60)
-    print("Training Distributional RQE-PPO (Single-Agent)")
-    print("=" * 60)
+    algorithm_name = "True RQE-PPO" if use_true_rqe else "Practical RQE-PPO"
+
+    print("=" * 80)
+    print(f"Training Distributional {algorithm_name} (SB3-based, Single-Agent)")
+    print("=" * 80)
     print(f"Environment: {env_name}")
     print(f"Risk aversion (tau): {tau}")
     print(f"Bounded rationality (epsilon): {epsilon}")
     print(f"Risk measure: {risk_measure}")
+    print(f"Total timesteps: {total_timesteps:,}")
     print(f"Seed: {seed}")
-    print("=" * 60)
-
-    # Set seeds
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    if use_true_rqe:
+        print(f"Using TRUE RQE gradient (exponential weights)")
+        print(f"  - Normalize weights: {normalize_weights}")
+        print(f"  - Weight clip: {weight_clip}")
+        print(f"  - Use PPO clipping: {use_clipping}")
+    else:
+        print(f"Using PRACTICAL RQE (risk-adjusted GAE)")
+    print("=" * 80)
 
     # Register custom environments
     register_risky_envs()
 
-    # Create environment
+    # Create environments
     env = gym.make(env_name)
     eval_env = gym.make(env_name)
-
-    # Get environment dimensions
-    obs_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.n
-
-    # Create agent config
-    config = DistributionalRQEPPOConfig(
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        tau=tau,
-        epsilon=epsilon,
-        risk_measure=risk_measure,
-        n_atoms=51,
-        v_min=-50.0,  # Adjust based on environment
-        v_max=50.0,
-        hidden_dims=[64, 64],
-        lr_actor=3e-4,
-        lr_critic=1e-3,
-        gamma=0.99,
-        gae_lambda=0.95,
-        n_epochs=10,
-        n_minibatches=4
-    )
-
-    # Create agent
-    agent = DistributionalRQE_PPO(config)
 
     # Create save directory
     save_path = Path(save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
 
-    # Training metrics
-    train_rewards = []
-    eval_rewards = []
-    eval_stds = []
-    eval_lengths = []
+    # Create RQE-PPO agent with SB3 infrastructure
+    if use_true_rqe:
+        # TRUE RQE with exponential importance weighting
+        model = TrueRQE_PPO_SB3(
+            "MlpPolicy",
+            env,
+            tau=tau,
+            risk_measure=risk_measure,
+            n_atoms=51,
+            v_min=0.0,
+            v_max=600.0,
+            learning_rate=1e-4,  # Lower LR for stability with importance sampling
+            n_steps=n_steps,
+            batch_size=64,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            normalize_advantage=False,  # We use weights, not advantages
+            ent_coef=epsilon,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+            use_clipping=use_clipping,
+            normalize_weights=normalize_weights,
+            weight_clip=weight_clip,
+            verbose=1,
+            seed=seed,
+        )
+    else:
+        # PRACTICAL RQE with risk-adjusted GAE
+        model = RQE_PPO_SB3(
+            "MlpPolicy",
+            env,
+            tau=tau,
+            risk_measure=risk_measure,
+            n_atoms=51,
+            v_min=0.0,
+            v_max=600.0,
+            learning_rate=3e-4,
+            n_steps=n_steps,
+            batch_size=64,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            normalize_advantage=True,
+            ent_coef=epsilon,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+            verbose=1,
+            seed=seed,
+        )
+
+    # Create callback for evaluation
+    callback = EvalCallback(
+        eval_env=eval_env,
+        eval_freq=eval_interval,
+        n_eval_episodes=10,
+        verbose=1,
+    )
 
     print("\nStarting training...")
-    print("-" * 60)
+    print("-" * 80)
 
-    # Training loop
-    for iteration in range(n_iterations):
-        # Collect rollouts
-        iteration_rewards = []
-        iteration_lengths = []
-        all_buffers = []
-
-        steps_collected = 0
-        while steps_collected < steps_per_iteration:
-            buffer, episode_reward, episode_length = collect_rollout(env, agent)
-            all_buffers.append(buffer)
-            iteration_rewards.append(episode_reward)
-            iteration_lengths.append(episode_length)
-            steps_collected += episode_length
-
-        # Combine buffers
-        combined_buffer = {
-            key: torch.cat([buf[key] for buf in all_buffers], dim=0)
-            for key in all_buffers[0].keys()
-        }
-
-        # Update agent
-        metrics = agent.update(combined_buffer)
-
-        # Log training progress
-        mean_reward = np.mean(iteration_rewards)
-        mean_length = np.mean(iteration_lengths)
-        train_rewards.append(mean_reward)
-
-        print(f"Iter {iteration:4d} | "
-              f"Reward: {mean_reward:7.2f} | "
-              f"Length: {mean_length:6.1f} | "
-              f"Actor Loss: {metrics['actor_loss']:7.4f} | "
-              f"Critic Loss: {metrics['critic_loss']:7.4f} | "
-              f"Entropy: {metrics['entropy']:6.4f}")
-
-        # Evaluate periodically
-        if (iteration + 1) % eval_interval == 0:
-            eval_mean, eval_std, eval_len = evaluate(eval_env, agent, n_episodes=10)
-            eval_rewards.append(eval_mean)
-            eval_stds.append(eval_std)
-            eval_lengths.append(eval_len)
-
-            print("-" * 60)
-            print(f"EVAL | Reward: {eval_mean:.2f} ± {eval_std:.2f} | Length: {eval_len:.1f}")
-            print("-" * 60)
-
-            # Save checkpoint
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            checkpoint_path = save_path / f"agent_tau{tau}_iter{iteration+1}_{timestamp}.pt"
-            agent.save(str(checkpoint_path))
-            print(f"Saved checkpoint: {checkpoint_path}")
+    # Train
+    model.learn(
+        total_timesteps=total_timesteps,
+        callback=callback,
+        progress_bar=True,
+    )
 
     # Final evaluation
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 80)
     print("Training complete!")
-    print("=" * 60)
-    final_mean, final_std, final_len = evaluate(eval_env, agent, n_episodes=20)
+    print("=" * 80)
+
+    episode_rewards = []
+    episode_lengths = []
+
+    for _ in range(20):
+        obs, _ = eval_env.reset()
+        terminated = False
+        truncated = False
+        episode_reward = 0
+        episode_length = 0
+
+        while not (terminated or truncated):
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, info = eval_env.step(action)
+            episode_reward += reward
+            episode_length += 1
+
+        episode_rewards.append(episode_reward)
+        episode_lengths.append(episode_length)
+
     print(f"Final evaluation (20 episodes):")
-    print(f"  Reward: {final_mean:.2f} ± {final_std:.2f}")
-    print(f"  Length: {final_len:.1f}")
-    print("=" * 60)
+    print(f"  Reward: {np.mean(episode_rewards):.2f} ± {np.std(episode_rewards):.2f}")
+    print(f"  Length: {np.mean(episode_lengths):.1f}")
+    print("=" * 80)
 
     # Save final model
-    final_path = save_path / f"agent_tau{tau}_final.pt"
-    agent.save(str(final_path))
+    suffix = "true" if use_true_rqe else "practical"
+    final_path = save_path / f"agent_tau{tau}_{suffix}_sb3.zip"
+    model.save(str(final_path))
     print(f"Saved final model: {final_path}")
 
     # Plot training curve
-    plt.figure(figsize=(12, 4))
+    if callback.evaluations:
+        plt.figure(figsize=(12, 4))
 
-    plt.subplot(1, 2, 1)
-    plt.plot(train_rewards, alpha=0.3, label='Train')
-    if eval_rewards:
-        eval_x = np.arange(eval_interval - 1, len(train_rewards), eval_interval)
-        plt.errorbar(eval_x, eval_rewards, yerr=eval_stds, label='Eval', capsize=3)
-    plt.xlabel('Iteration')
-    plt.ylabel('Reward')
-    plt.title(f'Training Curve (tau={tau})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+        iterations = [e['iteration'] for e in callback.evaluations]
+        mean_rewards = [e['mean_reward'] for e in callback.evaluations]
+        std_rewards = [e['std_reward'] for e in callback.evaluations]
+        mean_lengths = [e['mean_length'] for e in callback.evaluations]
 
-    plt.subplot(1, 2, 2)
-    if eval_lengths:
-        plt.plot(eval_x, eval_lengths, marker='o')
+        plt.subplot(1, 2, 1)
+        plt.plot(iterations, mean_rewards, linewidth=2, label='Eval Mean')
+        plt.fill_between(
+            iterations,
+            np.array(mean_rewards) - np.array(std_rewards),
+            np.array(mean_rewards) + np.array(std_rewards),
+            alpha=0.3,
+        )
+        plt.xlabel('Iteration')
+        plt.ylabel('Reward')
+        plt.title(f'{algorithm_name} (tau={tau}, ε={epsilon})')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        plt.subplot(1, 2, 2)
+        plt.plot(iterations, mean_lengths, marker='o')
         plt.xlabel('Iteration')
         plt.ylabel('Episode Length')
         plt.title(f'Episode Length (tau={tau})')
         plt.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    plot_path = save_path / f"training_curve_tau{tau}.png"
-    plt.savefig(plot_path, dpi=150)
-    print(f"Saved training curve: {plot_path}")
+        plt.tight_layout()
+        plot_path = save_path / f"training_curve_tau{tau}_{suffix}_sb3.png"
+        plt.savefig(plot_path, dpi=150)
+        print(f"Saved training curve: {plot_path}")
 
     env.close()
     eval_env.close()
 
-    return agent, train_rewards, eval_rewards
+    return model, callback
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--env", type=str, default="RiskyCartPole-medium-v0")
-    parser.add_argument("--tau", type=float, default=1.0, help="Risk aversion")
-    parser.add_argument("--epsilon", type=float, default=0.01, help="Bounded rationality")
-    parser.add_argument("--risk_measure", type=str, default="entropic", choices=["entropic", "cvar", "mean_variance"])
-    parser.add_argument("--n_iterations", type=int, default=500)
-    parser.add_argument("--steps_per_iteration", type=int, default=2048)
-    parser.add_argument("--eval_interval", type=int, default=50)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--save_dir", type=str, default="checkpoints/single_agent")
+    parser = argparse.ArgumentParser(description="Train RQE-PPO agent")
+
+    # Environment
+    parser.add_argument("--env", type=str, default="RiskyCartPole-medium-v0",
+                        help="Environment name")
+
+    # RQE parameters
+    parser.add_argument("--tau", type=float, default=1.0,
+                        help="Risk aversion (lower = more risk-averse)")
+    parser.add_argument("--epsilon", type=float, default=0.01,
+                        help="Bounded rationality (entropy coefficient)")
+    parser.add_argument("--risk_measure", type=str, default="entropic",
+                        choices=["entropic", "cvar", "mean_variance"],
+                        help="Risk measure type")
+
+    # Training parameters
+    parser.add_argument("--total_timesteps", type=int, default=None,
+                        help="Total training timesteps (overrides n_iterations)")
+    parser.add_argument("--n_iterations", type=int, default=500,
+                        help="Number of training iterations (default: 500, each is 2048 steps)")
+    parser.add_argument("--n_steps", type=int, default=2048,
+                        help="Steps per rollout")
+    parser.add_argument("--eval_interval", type=int, default=10,
+                        help="Evaluate every N iterations")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed")
+    parser.add_argument("--save_dir", type=str, default="checkpoints/single_agent",
+                        help="Directory to save checkpoints")
+
+    # Algorithm variant
+    parser.add_argument("--use_true_rqe", action="store_true",
+                        help="Use TRUE RQE gradient with exponential weights (default: practical GAE-based)")
+    parser.add_argument("--normalize_weights", action="store_true", default=True,
+                        help="Normalize importance weights (only for true RQE)")
+    parser.add_argument("--no_normalize_weights", action="store_false", dest="normalize_weights",
+                        help="Don't normalize weights")
+    parser.add_argument("--weight_clip", type=float, default=10.0,
+                        help="Clip extreme weights (only for true RQE)")
+    parser.add_argument("--use_clipping", action="store_true", default=True,
+                        help="Use PPO clipping (only for true RQE)")
+    parser.add_argument("--no_clipping", action="store_false", dest="use_clipping",
+                        help="Don't use PPO clipping")
 
     args = parser.parse_args()
+
+    # Compute total_timesteps from n_iterations if not specified
+    if args.total_timesteps is None:
+        args.total_timesteps = args.n_iterations * args.n_steps
 
     train(
         env_name=args.env,
         tau=args.tau,
         epsilon=args.epsilon,
         risk_measure=args.risk_measure,
-        n_iterations=args.n_iterations,
-        steps_per_iteration=args.steps_per_iteration,
+        total_timesteps=args.total_timesteps,
+        n_steps=args.n_steps,
         eval_interval=args.eval_interval,
         save_dir=args.save_dir,
-        seed=args.seed
+        seed=args.seed,
+        use_true_rqe=args.use_true_rqe,
+        normalize_weights=args.normalize_weights,
+        weight_clip=args.weight_clip,
+        use_clipping=args.use_clipping,
     )
