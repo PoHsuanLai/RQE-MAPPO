@@ -4,7 +4,7 @@
 echo "Quick test of RQE-MAPPO on SUMO..."
 echo ""
 
-export SUMO_HOME="/opt/homebrew/opt/sumo/share/sumo"
+export SUMO_HOME="/usr/share/sumo"
 
 uv run python -m src.train_sumo \
     --net single-intersection \

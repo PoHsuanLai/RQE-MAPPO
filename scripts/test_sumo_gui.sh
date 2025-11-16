@@ -1,7 +1,7 @@
 #!/bin/bash
 # Test SUMO GUI with a simple scenario
 
-export SUMO_HOME="/opt/homebrew/opt/sumo/share/sumo"
+export SUMO_HOME="/usr/share/sumo"
 
 echo "Testing SUMO-GUI..."
 echo "SUMO_HOME: $SUMO_HOME"
