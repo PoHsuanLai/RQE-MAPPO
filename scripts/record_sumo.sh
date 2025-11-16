@@ -11,7 +11,7 @@ echo "⚠️  Important: SUMO-GUI will open. Make sure it's visible on screen!"
 echo "   XQuartz must be installed and running for GUI screenshots."
 echo ""
 
-export SUMO_HOME="/opt/homebrew/opt/sumo/share/sumo"
+export SUMO_HOME="/usr/share/sumo"
 
 uv run python -m src.record_sumo \
     --exp_name $EXP_NAME \

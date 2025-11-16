@@ -87,7 +87,7 @@ def create_sumo_env(args):
     """Create SUMO environment"""
     # Set SUMO_HOME if not set
     if 'SUMO_HOME' not in os.environ:
-        os.environ['SUMO_HOME'] = '/opt/homebrew/opt/sumo/share/sumo'
+        os.environ['SUMO_HOME'] = '/usr/share/sumo'
 
     # Get sumo_rl package path
     import sumo_rl

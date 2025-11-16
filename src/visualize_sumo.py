@@ -34,7 +34,7 @@ def main():
 
     # Set SUMO_HOME if not set
     if 'SUMO_HOME' not in os.environ:
-        os.environ['SUMO_HOME'] = '/opt/homebrew/opt/sumo/share/sumo'
+        os.environ['SUMO_HOME'] = '/usr/share/sumo'
 
     print(f"\n{'='*70}")
     print("RQE-MAPPO Visualization in SUMO")
