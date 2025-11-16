@@ -1,4 +1,4 @@
-from .rqe_mappo import RQE_MAPPO, RQEConfig
 from .risk_measures import get_risk_measure, EntropicRisk, CVaR, MeanVariance
+from .rqe_exact import ExactRQE
 
-__all__ = ["RQE_MAPPO", "RQEConfig", "get_risk_measure", "EntropicRisk", "CVaR", "MeanVariance"]
+__all__ = ["get_risk_measure", "EntropicRisk", "CVaR", "MeanVariance", "ExactRQE"]

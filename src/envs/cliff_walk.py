@@ -37,6 +37,8 @@ class CliffWalkEnv(gym.Env):
         agent2_start: (row, col) for agent 2
         agent1_goal: (row, col) for agent 1's goal
         agent2_goal: (row, col) for agent 2's goal
+        return_joint_reward: If True, returns sum of rewards as scalar (for RL training).
+                            If False, returns tuple of (reward1, reward2) (per paper spec).
     """
 
     metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': 4}
@@ -56,13 +58,15 @@ class CliffWalkEnv(gym.Env):
         agent2_start: Tuple[int, int] = (1, 2),  # Above center cliff
         agent1_goal: Tuple[int, int] = (0, 0),   # Top-left
         agent2_goal: Tuple[int, int] = (5, 0),   # Bottom-left
-        render_mode: Optional[str] = None
+        render_mode: Optional[str] = None,
+        return_joint_reward: bool = True  # Default: sum for RL training
     ):
         super().__init__()
 
         self.height, self.width = grid_size
         self.horizon = horizon
         self.render_mode = render_mode
+        self.return_joint_reward = return_joint_reward
 
         # Default cliff configuration (from paper's Figure 2)
         # 4 blocks between the goals (left column) + 4 blocks in center = 8 total
@@ -127,26 +131,32 @@ class CliffWalkEnv(gym.Env):
 
         With probability pd: move in intended direction
         With probability (1-pd): random movement
-        """
-        new_pos = pos.copy()
 
+        If action would move agent into wall, agent stays in place.
+        """
         # Determine actual action (intended or random)
         if self.np_random.random() < pd:
             actual_action = action
         else:
             actual_action = self.np_random.integers(0, 4)
 
-        # Apply movement
+        # Calculate intended new position
+        new_pos = pos.copy()
         if actual_action == self.UP:
-            new_pos[0] = max(0, new_pos[0] - 1)
+            new_pos[0] = new_pos[0] - 1
         elif actual_action == self.DOWN:
-            new_pos[0] = min(self.height - 1, new_pos[0] + 1)
+            new_pos[0] = new_pos[0] + 1
         elif actual_action == self.LEFT:
-            new_pos[1] = max(0, new_pos[1] - 1)
+            new_pos[1] = new_pos[1] - 1
         elif actual_action == self.RIGHT:
-            new_pos[1] = min(self.width - 1, new_pos[1] + 1)
+            new_pos[1] = new_pos[1] + 1
 
-        return new_pos
+        # Check if new position is valid (within bounds)
+        if 0 <= new_pos[0] < self.height and 0 <= new_pos[1] < self.width:
+            return new_pos
+        else:
+            # Hit wall - stay in place
+            return pos.copy()
 
     def _is_cliff(self, pos):
         """Check if position is a cliff"""
@@ -191,7 +201,7 @@ class CliffWalkEnv(gym.Env):
         if not agent2_in_cliff:
             self.agent2_pos = new_pos2
 
-        # Compute rewards
+        # Compute rewards (separated per agent as per paper)
         reward1 = 0.0
         reward2 = 0.0
 
@@ -205,8 +215,13 @@ class CliffWalkEnv(gym.Env):
         elif self._is_goal(self.agent2_pos, 2):
             reward2 = 1.0
 
-        # Combined reward (sum for cooperative task)
-        reward = reward1 + reward2
+        # Return reward based on configuration
+        if self.return_joint_reward:
+            # Return scalar sum for RL training compatibility
+            reward = reward1 + reward2
+        else:
+            # Return separated rewards as tuple (per paper specification)
+            reward = (reward1, reward2)
 
         # Check termination
         self.timestep += 1
@@ -323,10 +338,10 @@ def register_cliff_walk():
 
 
 if __name__ == "__main__":
-    # Test the environment
-    print("Testing Cliff Walk Environment...")
+    # Test the environment with separated rewards
+    print("Testing Cliff Walk Environment (separated rewards)...")
 
-    env = CliffWalkEnv(render_mode='human')
+    env = CliffWalkEnv(render_mode='human', return_joint_reward=False)
     obs, info = env.reset(seed=42)
 
     print(f"Initial observation: {obs}")
@@ -339,11 +354,27 @@ if __name__ == "__main__":
         obs, reward, terminated, truncated, info = env.step(action)
 
         env.render()
-        print(f"Action: {action}, Reward: {reward:.1f}")
+        print(f"Action: {action}, Reward: {reward} (agent1={reward[0]:.1f}, agent2={reward[1]:.1f})")
         print(f"Info: {info}")
 
         if terminated or truncated:
             print("Episode ended!")
             break
 
-    print("\n✓ Environment test passed!")
+    print("\n✓ Environment test (separated rewards) passed!")
+
+    # Test with joint reward
+    print("\nTesting Cliff Walk Environment (joint reward for RL)...")
+    env2 = CliffWalkEnv(return_joint_reward=True)
+    obs, info = env2.reset(seed=42)
+
+    for i in range(3):
+        action = env2.action_space.sample()
+        obs, reward, terminated, truncated, info = env2.step(action)
+        print(f"Action: {action}, Joint Reward: {reward:.1f} (agent1={info['agent1_reward']:.1f}, agent2={info['agent2_reward']:.1f})")
+
+        if terminated or truncated:
+            print("Episode ended!")
+            break
+
+    print("\n✓ All environment tests passed!")

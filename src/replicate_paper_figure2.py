@@ -8,17 +8,14 @@ The paper shows cliff walk scenarios with asymmetric risk preferences:
 Both agents have bounded rationality: ε₁, ε₂
 """
 
-import sys
-sys.path.insert(0, '/Users/pohsuanlai/Documents/rqe/stable-baselines3')
-
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
-from src.envs.cliff_walk import CliffWalkEnv
-from src.algorithms.rqe_ppo_sb3 import RQE_PPO_SB3
+from envs.cliff_walk import CliffWalkEnv
+from algorithms.rqe_exact import ExactRQE
 
 
-def visualize_trajectory(env, model, title, ax, max_steps=200):
+def visualize_trajectory(env, solver, title, ax, max_steps=200):
     """Visualize a single trajectory on the cliff walk grid"""
     obs, _ = env.reset(seed=42)
 
@@ -30,7 +27,17 @@ def visualize_trajectory(env, model, title, ax, max_steps=200):
     step = 0
 
     while not done and step < max_steps:
-        action, _ = model.predict(obs, deterministic=True)
+        # Get action from exact RQE solver
+        state_idx = solver._state_to_index(obs)
+
+        # Get policy at current timestep
+        h = min(step, solver.horizon - 1)
+
+        # Sample actions from equilibrium policy
+        action1 = np.random.choice(solver.n_actions, p=solver.pi[h][0][state_idx])
+        action2 = np.random.choice(solver.n_actions, p=solver.pi[h][1][state_idx])
+        action = np.array([action1, action2])
+
         obs, reward, terminated, truncated, info = env.step(action)
 
         agent1_path.append(env.agent1_pos.copy())
@@ -164,42 +171,34 @@ def visualize_trajectory(env, model, title, ax, max_steps=200):
            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
 
-def train_and_visualize_scenario(tau1, tau2, epsilon1, epsilon2, timesteps=50000):
+def compute_rqe_scenario(tau1, tau2, epsilon1, epsilon2, horizon=200):
     """
-    Train RQE with asymmetric risk parameters
+    Compute exact RQE equilibrium with asymmetric risk parameters
 
-    Note: The current implementation uses a single tau parameter.
-    For true multi-agent asymmetric risk, we would need to modify
-    the algorithm to support per-agent risk parameters.
-
-    For now, we'll use the average tau as an approximation.
+    Uses backward induction (Algorithm 1 from paper) to compute
+    the exact RQE equilibrium.
     """
     print(f"\nScenario: τ₁={tau1}, τ₂={tau2}, ε₁={epsilon1}, ε₂={epsilon2}")
+    print(f"  Computing exact RQE equilibrium via backward induction...")
 
-    # Use average tau (limitation of current implementation)
-    tau_avg = (tau1 + tau2) / 2
-    print(f"  Using average τ={tau_avg:.3f} (current implementation limitation)")
+    env = CliffWalkEnv(return_joint_reward=False)  # Need separated rewards
 
-    env = CliffWalkEnv()
-    model = RQE_PPO_SB3(
-        "MlpPolicy",
-        env,
-        tau=tau_avg,
+    solver = ExactRQE(
+        env=env,
+        tau=[tau1, tau2],
+        epsilon=[epsilon1, epsilon2],
         risk_measure="entropic",
         n_atoms=51,
         v_min=-10.0,
-        v_max=50.0,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=64,
-        n_epochs=10,
-        gamma=0.99,
-        verbose=0,
+        v_max=10.0,
+        horizon=horizon
     )
 
-    model.learn(total_timesteps=timesteps, progress_bar=True)
+    # Compute equilibrium
+    solver.solve()
+    print(f"  ✓ Equilibrium computed!")
 
-    return model
+    return solver
 
 
 if __name__ == "__main__":
@@ -229,21 +228,21 @@ if __name__ == "__main__":
 
     for idx, scenario in enumerate(scenarios):
         print(f"\n{'='*70}")
-        print(f"Training: {scenario['name']}")
+        print(f"Computing: {scenario['name']}")
         print(f"{'='*70}")
 
-        model = train_and_visualize_scenario(
+        solver = compute_rqe_scenario(
             tau1=scenario['tau1'],
             tau2=scenario['tau2'],
             epsilon1=scenario['epsilon1'],
             epsilon2=scenario['epsilon2'],
-            timesteps=1000000  # Increased for better convergence
+            horizon=200
         )
 
         # Visualize
-        env = CliffWalkEnv()
+        env = CliffWalkEnv(return_joint_reward=False)
         title = f"{scenario['name']}\nτ₁={scenario['tau1']}, τ₂={scenario['tau2']}, ε₁={scenario['epsilon1']}, ε₂={scenario['epsilon2']}"
-        visualize_trajectory(env, model, title, axes[idx])
+        visualize_trajectory(env, solver, title, axes[idx])
 
     plt.tight_layout()
 
