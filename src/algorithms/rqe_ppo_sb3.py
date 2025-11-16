@@ -299,6 +299,10 @@ class RQE_PPO_SB3(PPO):
         observations = rollout_data.observations
         returns = rollout_data.returns  # Monte Carlo returns from GAE
 
+        # Ensure observations are float32
+        if observations.dtype != th.float32:
+            observations = observations.float()
+
         # Get current distribution
         current_probs = self.distributional_critic(observations)
 

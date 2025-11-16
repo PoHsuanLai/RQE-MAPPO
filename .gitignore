@@ -143,5 +143,5 @@ screenshots/
 !proposal/figures/*.png
 !proposal/*.png
 
-
+checkpoints/*
 CLAUDE.md
