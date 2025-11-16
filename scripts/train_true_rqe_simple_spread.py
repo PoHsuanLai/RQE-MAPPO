@@ -17,8 +17,8 @@ from ray.rllib.env.wrappers.pettingzoo_env import ParallelPettingZooEnv
 from pettingzoo.mpe import simple_spread_v3
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "sumo-rl" / "sumo_rl_baseline"))
-from true_rqe_ppo_integrated import TrueRQEPPO, TrueRQEPPOConfig
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from algorithms.true_rqe_ppo_rllib import TrueRQEPPO, TrueRQEPPOConfig
 
 
 def parse_args():
