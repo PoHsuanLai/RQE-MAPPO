@@ -20,12 +20,11 @@ from torch.distributions import Categorical
 
 @dataclass
 class TrueRQEConfig:
-    """Configuration for True RQE-MAPPO"""
+    """Configuration for True RQE-MAPPO (model-agnostic)"""
 
     # Environment
     n_agents: int
-    obs_dim: int
-    action_dim: int
+    action_dim: int  # Still needed for some calculations
 
     # Risk-aversion parameters
     tau: float = 1.0  # Risk aversion (lower = more risk-averse)
@@ -109,6 +108,18 @@ class ActionConditionedDistributionalCritic(nn.Module):
         layers.append(nn.Linear(last_dim, action_dim * n_atoms))
 
         self.network = nn.Sequential(*layers)
+
+        # Initialize weights for numerical stability
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize network weights for stability"""
+        for m in self.network.modules():
+            if isinstance(m, nn.Linear):
+                # Small orthogonal initialization
+                nn.init.orthogonal_(m.weight, gain=0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """
@@ -238,9 +249,24 @@ class Actor(nn.Module):
 
         self.network = nn.Sequential(*layers)
 
+        # Initialize weights for numerical stability
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize network weights for stability"""
+        for m in self.network.modules():
+            if isinstance(m, nn.Linear):
+                # Orthogonal initialization for better gradient flow
+                nn.init.orthogonal_(m.weight, gain=0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """Get action logits"""
-        return self.network(obs)
+        logits = self.network(obs)
+        # Clamp logits to prevent extreme values
+        logits = torch.clamp(logits, min=-10.0, max=10.0)
+        return logits
 
     def get_action(self, obs: torch.Tensor, deterministic: bool = False):
         """Sample actions from policy"""
@@ -268,29 +294,34 @@ class TrueRQE_MAPPO:
     1. Uses action-conditioned critics Q_risk(s,a) instead of V_risk(s)
     2. Applies exponential importance weighting in policy gradient
     3. More computationally expensive but theoretically correct
+
+    This class is MODEL-AGNOSTIC - it accepts any actor and critic networks.
     """
 
-    def __init__(self, config: TrueRQEConfig):
+    def __init__(
+        self,
+        actors: List[nn.Module],
+        critics: List[nn.Module],
+        config: TrueRQEConfig
+    ):
+        """
+        Initialize TrueRQE-MAPPO with custom actor and critic networks
+
+        Args:
+            actors: List of actor networks, one per agent
+                    Each must implement: forward(obs) -> logits
+                                       get_action(obs, deterministic) -> (actions, log_probs, entropies)
+            critics: List of critic networks, one per agent
+                     Each must implement: get_risk_value(obs, actions, tau, risk_type) -> q_values
+                                        forward(obs) -> probs [batch, action_dim, n_atoms]
+            config: TrueRQEConfig with algorithm hyperparameters
+        """
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Create actors and action-conditioned critics for each agent
-        self.actors = nn.ModuleList([
-            Actor(config.obs_dim, config.action_dim, config.hidden_dims)
-            for _ in range(config.n_agents)
-        ]).to(self.device)
-
-        self.critics = nn.ModuleList([
-            ActionConditionedDistributionalCritic(
-                config.obs_dim,
-                config.action_dim,
-                config.hidden_dims,
-                config.n_atoms,
-                config.v_min,
-                config.v_max
-            )
-            for _ in range(config.n_agents)
-        ]).to(self.device)
+        # Store provided networks
+        self.actors = nn.ModuleList(actors).to(self.device)
+        self.critics = nn.ModuleList(critics).to(self.device)
 
         # Optimizers
         self.actor_optimizers = [
@@ -480,8 +511,13 @@ class TrueRQE_MAPPO:
                     tau=self.config.tau,
                     risk_type=self.config.risk_measure
                 )
+                # Clamp Q-values to prevent overflow in exp
+                q_risk_values = torch.clamp(q_risk_values, min=-10.0, max=10.0)
+
                 # Exponential weighting: exp(-τ * Q_risk(s,a))
-                importance_weights = torch.exp(-self.config.tau * q_risk_values)
+                # Clamp the exponent to prevent overflow
+                exponent = torch.clamp(-self.config.tau * q_risk_values, min=-20.0, max=20.0)
+                importance_weights = torch.exp(exponent)
                 # Normalize for stability
                 importance_weights = importance_weights / (importance_weights.mean() + 1e-8)
 
@@ -606,13 +642,10 @@ class TrueRQE_MAPPO:
 
         policy_snapshot = self.policy_population[np.random.randint(len(self.policy_population))]
 
-        opponent = Actor(
-            self.config.obs_dim,
-            self.config.action_dim,
-            self.config.hidden_dims
-        ).to(self.device)
-
+        # Create opponent by cloning one of the existing actors
+        import copy
         opponent_agent_id = np.random.choice([i for i in range(self.config.n_agents) if i != agent_id])
+        opponent = copy.deepcopy(self.actors[opponent_agent_id])
         opponent.load_state_dict(policy_snapshot[opponent_agent_id])
         opponent.eval()
 

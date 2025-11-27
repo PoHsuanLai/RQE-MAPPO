@@ -161,8 +161,15 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Initialize Ray
-    ray.init(ignore_reinit_error=True)
+    # Initialize Ray with runtime environment for workers
+    src_path = str(Path(__file__).parent.parent / "src")
+    ray.init(
+        ignore_reinit_error=True,
+        runtime_env={
+            "env_vars": {"PYTHONPATH": src_path},
+            "py_modules": [Path(src_path) / "algorithms"],
+        }
+    )
 
     # Environment name
     env_name = "simple_spread"

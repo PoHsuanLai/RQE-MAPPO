@@ -1,4 +1,13 @@
-from .actor import ActorNetwork
-from .critic import CriticNetwork
+"""
+Network architectures for different observation types
+"""
 
-__all__ = ["ActorNetwork", "CriticNetwork"]
+from .fc_networks import FCActor, FCDistributionalCritic
+from .cnn_networks import CNNActor, CNNDistributionalCritic
+
+__all__ = [
+    "FCActor",
+    "FCDistributionalCritic",
+    "CNNActor",
+    "CNNDistributionalCritic",
+]

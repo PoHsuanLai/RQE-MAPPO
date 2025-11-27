@@ -72,6 +72,18 @@ class ActionConditionedDistributionalCritic(nn.Module):
 
         self.network = nn.Sequential(*layers)
 
+        # Initialize weights for numerical stability
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize network weights for stability"""
+        for m in self.network.modules():
+            if isinstance(m, nn.Linear):
+                # Small orthogonal initialization
+                nn.init.orthogonal_(m.weight, gain=0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """
         Get distribution logits for all actions
@@ -154,11 +166,15 @@ class ActionConditionedDistributionalCritic(nn.Module):
             z_expanded = z_values.expand(batch_size, -1)  # [batch, n_atoms]
 
             # Compute weighted exponential: p_i * exp(-τ * z_i)
-            weighted_exp = probs * torch.exp(-tau * z_expanded)
+            # Clamp exponent to prevent overflow
+            exponent = torch.clamp(-tau * z_expanded, min=-20.0, max=20.0)
+            weighted_exp = probs * torch.exp(exponent)
             sum_weighted_exp = weighted_exp.sum(dim=-1)  # [batch]
 
             # Risk measure: -(1/τ) log(sum)
             q_risk = -(1.0 / tau) * torch.log(sum_weighted_exp + 1e-8)
+            # Clamp final Q values
+            q_risk = torch.clamp(q_risk, min=-10.0, max=10.0)
 
         elif risk_type == "expectation":
             # Standard expectation (risk-neutral)
@@ -197,11 +213,15 @@ class ActionConditionedDistributionalCritic(nn.Module):
             z_expanded = z_values.expand(batch_size, action_dim, n_atoms)
 
             # Compute: p(z|s,a) * exp(-τ * z)
-            weighted_exp = probs * torch.exp(-tau * z_expanded)
+            # Clamp exponent to prevent overflow
+            exponent = torch.clamp(-tau * z_expanded, min=-20.0, max=20.0)
+            weighted_exp = probs * torch.exp(exponent)
             sum_weighted_exp = weighted_exp.sum(dim=-1)  # [batch, action_dim]
 
             # Risk measure: -(1/τ) log(sum)
             all_q_risk = -(1.0 / tau) * torch.log(sum_weighted_exp + 1e-8)
+            # Clamp final Q values
+            all_q_risk = torch.clamp(all_q_risk, min=-10.0, max=10.0)
 
         elif risk_type == "expectation":
             # Standard Q-values (risk-neutral)
@@ -334,6 +354,9 @@ class TrueRQEModel(TorchModelV2, nn.Module):
 
         self.policy_network = nn.Sequential(*policy_layers)
 
+        # Initialize policy network weights
+        self._init_policy_weights()
+
         # Standard value network (for PPO baseline)
         value_layers = []
         last_dim = obs_dim
@@ -355,6 +378,14 @@ class TrueRQEModel(TorchModelV2, nn.Module):
             v_max=self.v_max,
         )
 
+    def _init_policy_weights(self):
+        """Initialize policy network weights for stability"""
+        for m in self.policy_network.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
         # Store last observation for value function
         self._last_obs = None
 
@@ -370,6 +401,8 @@ class TrueRQEModel(TorchModelV2, nn.Module):
 
         # Policy logits
         logits = self.policy_network(obs)
+        # Clamp logits to prevent extreme values
+        logits = torch.clamp(logits, min=-10.0, max=10.0)
 
         return logits, state
 
@@ -467,7 +500,9 @@ def true_rqe_postprocess_advantages(
 
         # Exponential importance weights: w(s,a) = exp(-τ * Q_risk(s,a))
         # Lower Q (worse outcome) → higher weight → focus learning there
-        rqe_weights = torch.exp(-tau * q_risk)
+        # Clamp the exponent to prevent overflow
+        exponent = torch.clamp(-tau * q_risk, min=-20.0, max=20.0)
+        rqe_weights = torch.exp(exponent)
 
         if normalize_weights:
             rqe_weights = rqe_weights / (rqe_weights.mean() + 1e-8)

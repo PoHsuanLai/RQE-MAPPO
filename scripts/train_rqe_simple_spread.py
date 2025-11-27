@@ -144,8 +144,16 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Initialize Ray
-    ray.init(ignore_reinit_error=True)
+    # Initialize Ray with runtime environment for workers
+    src_path = str(Path(__file__).parent.parent / "src")
+    ray.init(
+        ignore_reinit_error=True,
+        runtime_env={
+            "env_vars": {"PYTHONPATH": src_path},
+            "py_modules": [Path(src_path) / "algorithms"],
+            "excludes": ["results/", "*.git/", "sumo-rl/", "risk-aware-rl/", "*.pack", "*.json"],
+        }
+    )
 
     # Environment name
     env_name = "simple_spread"
@@ -176,20 +184,20 @@ def main():
         .environment(env=env_name, disable_env_checking=True)
         .framework("torch")
         .resources(num_gpus=args.num_gpus)
-        .rollouts(
-            num_rollout_workers=args.num_workers,
+        .env_runners(
+            num_env_runners=args.num_workers,
             rollout_fragment_length=args.max_cycles,
         )
-        .rl_module(_enable_rl_module_api=False)
-        .training(_enable_learner_api=False)
+        .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
+        .experimental(_disable_preprocessor_api=True)
         .training(
             # RQE parameters
             tau=args.tau,
             epsilon=args.epsilon,
             # PPO parameters
             train_batch_size=args.train_batch_size,
-            sgd_minibatch_size=args.sgd_minibatch_size,
-            num_sgd_iter=args.num_sgd_iter,
+            minibatch_size=args.sgd_minibatch_size,
+            num_epochs=args.num_sgd_iter,
             lr=args.lr,
             gamma=args.gamma,
             lambda_=args.lambda_,
@@ -199,7 +207,9 @@ def main():
             entropy_coeff=args.epsilon,
             use_gae=True,
             use_critic=True,
-            model={
+        )
+        .rl_module(
+            model_config={
                 "fcnet_hiddens": [256, 256],
                 "fcnet_activation": "relu",
                 "vf_share_layers": False,
@@ -233,7 +243,7 @@ def main():
         stop={"timesteps_total": args.stop_timesteps},
         checkpoint_freq=args.checkpoint_freq,
         checkpoint_at_end=True,
-        local_dir=args.local_dir,
+        storage_path=args.local_dir,
         verbose=1,
     )
 
@@ -243,10 +253,12 @@ def main():
     print("="*70)
 
     # Get best checkpoint
-    best_trial = results.get_best_trial(metric="episode_reward_mean", mode="max")
+    best_trial = results.get_best_trial(metric="env_runners/episode_return_mean", mode="max")
     if best_trial:
         print(f"Best checkpoint: {best_trial.checkpoint}")
-        print(f"Best reward: {best_trial.last_result['episode_reward_mean']:.2f}")
+        reward = best_trial.last_result.get('env_runners/episode_return_mean',
+                                             best_trial.last_result.get('episode_reward_mean', 'N/A'))
+        print(f"Best reward: {reward}")
 
     ray.shutdown()
 

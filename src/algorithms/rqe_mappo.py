@@ -21,11 +21,10 @@ from torch.distributions import Categorical
 
 @dataclass
 class RQEConfig:
-    """Configuration for RQE-MAPPO"""
+    """Configuration for RQE-MAPPO (model-agnostic)"""
 
     # Environment
     n_agents: int
-    obs_dim: int
     action_dim: int
 
     # Risk-aversion parameters
@@ -275,28 +274,34 @@ class RQE_MAPPO:
     - Distributional critics for risk-averse learning
     - Self-play for equilibrium convergence
     - Centralized training, decentralized execution (CTDE)
+
+    This class is MODEL-AGNOSTIC - it accepts any actor and critic networks.
     """
 
-    def __init__(self, config: RQEConfig):
+    def __init__(
+        self,
+        actors: List[nn.Module],
+        critics: List[nn.Module],
+        config: RQEConfig
+    ):
+        """
+        Initialize RQE-MAPPO with custom actor and critic networks
+
+        Args:
+            actors: List of actor networks, one per agent
+                    Each must implement: forward(obs) -> logits
+                                       get_action(obs, deterministic) -> (actions, log_probs, entropies)
+            critics: List of critic networks, one per agent
+                     Each must implement: get_risk_value(obs, tau, risk_type) -> values
+                                        forward(obs) -> probs [batch, n_atoms]
+            config: RQEConfig with algorithm hyperparameters
+        """
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Create actors and critics for each agent
-        self.actors = nn.ModuleList([
-            Actor(config.obs_dim, config.action_dim, config.hidden_dims)
-            for _ in range(config.n_agents)
-        ]).to(self.device)
-
-        self.critics = nn.ModuleList([
-            DistributionalCritic(
-                config.obs_dim,
-                config.hidden_dims,
-                config.n_atoms,
-                config.v_min,
-                config.v_max
-            )
-            for _ in range(config.n_agents)
-        ]).to(self.device)
+        # Store provided networks
+        self.actors = nn.ModuleList(actors).to(self.device)
+        self.critics = nn.ModuleList(critics).to(self.device)
 
         # Optimizers
         self.actor_optimizers = [
@@ -331,6 +336,9 @@ class RQE_MAPPO:
             log_probs: [batch, n_agents]
             entropies: [batch, n_agents]
         """
+        # Move to device
+        obs = obs.to(self.device)
+
         actions_list = []
         log_probs_list = []
         entropies_list = []
@@ -363,6 +371,9 @@ class RQE_MAPPO:
         Returns:
             values: [batch, n_agents]
         """
+        # Move to device
+        obs = obs.to(self.device)
+
         values_list = []
 
         for agent_id in range(self.config.n_agents):
@@ -591,12 +602,11 @@ class RQE_MAPPO:
         # Sample random past policy
         policy_snapshot = self.policy_population[np.random.randint(len(self.policy_population))]
 
-        # Create temporary actor and load weights
-        opponent = Actor(
-            self.config.obs_dim,
-            self.config.action_dim,
-            self.config.hidden_dims
-        ).to(self.device)
+        # Create opponent by cloning one of the existing actors
+        import copy
+        opponent_agent_id = np.random.choice([i for i in range(self.config.n_agents) if i != agent_id])
+        opponent = copy.deepcopy(self.actors[opponent_agent_id])
+        opponent.to(self.device)
 
         # Load the opponent's policy (could be any agent from the population)
         # For simplicity, sample another agent's policy
@@ -617,7 +627,7 @@ class RQE_MAPPO:
 
     def load(self, path: str):
         """Load all agents' policies and critics"""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
         for i, actor_state in enumerate(checkpoint["actors"]):
             self.actors[i].load_state_dict(actor_state)
