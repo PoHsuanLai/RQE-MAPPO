@@ -136,10 +136,13 @@ class MarkovGame:
       Shape: [n_states, A_1, A_2, ..., A_n]
     - transitions[h]: P_h(s' | s, a) - transition probabilities at time h
       Shape: [n_states, A_1, A_2, ..., A_n, n_states]
+    - action_masks[i]: mask for valid actions per state for player i
+      Shape: [n_states, A_i], 1 = valid, 0 = invalid
     """
     config: MarkovGameConfig
     payoffs: List[List[torch.Tensor]]    # payoffs[player][timestep]
     transitions: List[torch.Tensor]       # transitions[timestep]
+    action_masks: List[torch.Tensor] = None  # action_masks[player], shape [n_states, A_i]
 
     def __post_init__(self):
         """Validate game specification"""
@@ -210,7 +213,7 @@ class MarkovRQESolver:
 
             # Solve RQE at each state
             state_policies, state_values = self._solve_stage_games(
-                Q_matrices, device
+                Q_matrices, device, game.action_masks
             )
 
             # Store results
@@ -266,14 +269,29 @@ class MarkovRQESolver:
 
             if self.config.penalty_env == PenaltyType.KL_DIVERGENCE:
                 # For KL penalty: use soft-minimum (entropic risk measure)
-                # Q = R - τ · log E_P[exp(-V/τ)]  (risk-averse version)
+                # ρ_τ(V) = -τ · log E[exp(-V/τ)]
                 #
-                # HOWEVER: With very small τ (0.01), this causes numerical issues.
-                # Use risk-neutral continuation for stability - the risk-aversion
-                # is primarily handled through τ in the matrix game solver.
+                # Properties:
+                # - Always ≤ E[V] (pessimistic/risk-averse)
+                # - As τ → ∞: approaches E[V] (risk-neutral)
+                # - As τ → 0: approaches min(V) (worst-case)
+                # - Higher τ = LESS risk-averse (counterintuitive but standard)
 
-                # Use risk-neutral (expected value) continuation for numerical stability
-                continuation = torch.tensordot(P_h, V_next, dims=([[-1], [0]]))
+                # Numerically stable computation using log-sum-exp trick
+                # ρ_τ(V) = -τ · log E[exp(-V/τ)]
+                #        = -τ · log (sum_s' P(s') exp(-V(s')/τ))
+                #
+                # Let z = -V/τ, then we compute -τ · log(P @ exp(z))
+                # Use log-sum-exp: log(sum(w_i * exp(z_i))) = max(z) + log(sum(w_i * exp(z_i - max(z))))
+                z = -V_next / tau_i  # [S]
+                z_max = z.max()
+                exp_z_stable = torch.exp(z - z_max)  # [S], all values <= 1
+
+                # Weighted sum: sum_s' P(s'|s,a) * exp(z(s') - z_max)
+                weighted_exp = torch.tensordot(P_h, exp_z_stable, dims=([[-1], [0]]))  # [S, A1, A2]
+
+                # Final result: -τ * (z_max + log(weighted_exp))
+                continuation = -tau_i * (z_max + torch.log(weighted_exp + 1e-10))
 
             elif self.config.penalty_env == PenaltyType.TOTAL_VARIATION:
                 # For TV penalty: robust MDP formulation
@@ -295,7 +313,8 @@ class MarkovRQESolver:
     def _solve_stage_games(
         self,
         Q_matrices: List[torch.Tensor],
-        device: torch.device
+        device: torch.device,
+        action_masks: List[torch.Tensor] = None
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
         Solve RQE for each state's stage game (VECTORIZED over all states).
@@ -308,18 +327,16 @@ class MarkovRQESolver:
         Args:
             Q_matrices[i]: [n_states, A_1, ..., A_n] payoff matrices
             device: torch device
+            action_masks[i]: [n_states, A_i] action masks (1=valid, 0=invalid)
 
         Returns:
             policies[i]: [n_states, A_i] equilibrium strategies
             values[i]: [n_states] equilibrium values
         """
         n = self.n_players
-        S = self.n_states
 
         # Currently only support 2-player games
         assert n == 2, "Markov RQE solver currently only supports 2-player games"
-
-        A1, A2 = self.config.action_dims
 
         # Q_matrices[0] has shape [S, A1, A2]
         # Q_matrices[1] has shape [S, A1, A2]
@@ -329,8 +346,12 @@ class MarkovRQESolver:
         # For player 2's perspective, we need Q2 transposed: [S, A2, A1]
         Q2_transposed = Q2.transpose(1, 2)  # [S, A2, A1]
 
+        # Get action masks if provided
+        mask1 = action_masks[0].to(device) if action_masks is not None else None
+        mask2 = action_masks[1].to(device) if action_masks is not None else None
+
         # Solve RQE for ALL states in parallel (batch_size = S)
-        pi1, pi2 = self._solve_matrix_rqe(Q1, Q2_transposed, device)
+        pi1, pi2 = self._solve_matrix_rqe(Q1, Q2_transposed, device, mask1, mask2)
 
         # pi1: [S, A1], pi2: [S, A2]
         policies = [pi1, pi2]
@@ -349,7 +370,9 @@ class MarkovRQESolver:
         self,
         Q1: torch.Tensor,
         Q2: torch.Tensor,
-        device: torch.device
+        device: torch.device,
+        mask1: torch.Tensor = None,
+        mask2: torch.Tensor = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Solve RQE for a 2-player matrix game using mirror descent.
@@ -364,6 +387,8 @@ class MarkovRQESolver:
             Q1: [batch, A_1, A_2] - Player 1's payoff matrix
             Q2: [batch, A_2, A_1] - Player 2's payoff matrix
             device: torch device
+            mask1: [batch, A_1] - Action mask for player 1 (1=valid, 0=invalid)
+            mask2: [batch, A_2] - Action mask for player 2 (1=valid, 0=invalid)
 
         Returns:
             pi1: [batch, A_1] - Player 1's equilibrium strategy
@@ -379,37 +404,37 @@ class MarkovRQESolver:
         Q1 = torch.nan_to_num(Q1, nan=0.0, posinf=100.0, neginf=-100.0)
         Q2 = torch.nan_to_num(Q2, nan=0.0, posinf=100.0, neginf=-100.0)
 
-        # IMPORTANT: We should NOT normalize Q-matrices globally as this destroys
-        # the reward signal. Instead, just clamp extreme values.
-        Q1 = torch.clamp(Q1, -100.0, 100.0)
-        Q2 = torch.clamp(Q2, -100.0, 100.0)
+        # Initialize strategies uniformly over valid actions
+        if mask1 is not None:
+            n_valid1 = mask1.sum(dim=-1, keepdim=True).clamp(min=1)
+            pi1 = mask1.float() / n_valid1
+        else:
+            pi1 = torch.ones(batch_size, A1, device=device) / A1
 
-        # Initialize strategies uniformly
-        pi1 = torch.ones(batch_size, A1, device=device) / A1
-        pi2 = torch.ones(batch_size, A2, device=device) / A2
+        if mask2 is not None:
+            n_valid2 = mask2.sum(dim=-1, keepdim=True).clamp(min=1)
+            pi2 = mask2.float() / n_valid2
+        else:
+            pi2 = torch.ones(batch_size, A2, device=device) / A2
 
         # Adversarial beliefs
         p1 = pi2.clone()  # Adversary 1's belief about player 2
         p2 = pi1.clone()  # Adversary 2's belief about player 1
 
-        lr = self.config.solver_lr
-
-        for iteration in range(self.config.solver_iterations):
+        for _ in range(self.config.solver_iterations):
             old_pi1, old_pi2 = pi1.clone(), pi2.clone()
 
             # === Update Player 1 ===
             # Gradient: Q_1 @ p_1 (expected payoff under adversary's belief)
             grad_pi1 = torch.bmm(Q1, p1.unsqueeze(-1)).squeeze(-1)  # [batch, A1]
-            # Clamp gradient for stability
             grad_pi1 = torch.clamp(grad_pi1, -50.0, 50.0)
-            # Mirror descent with entropy regularizer
-            pi1 = self._mirror_step(pi1, grad_pi1, eps1, maximize=True)
+            pi1 = self._mirror_step(pi1, grad_pi1, eps1, maximize=True, action_mask=mask1)
 
             # === Update Player 2 ===
             # Gradient: Q_2 @ p_2
             grad_pi2 = torch.bmm(Q2, p2.unsqueeze(-1)).squeeze(-1)  # [batch, A2]
             grad_pi2 = torch.clamp(grad_pi2, -50.0, 50.0)
-            pi2 = self._mirror_step(pi2, grad_pi2, eps2, maximize=True)
+            pi2 = self._mirror_step(pi2, grad_pi2, eps2, maximize=True, action_mask=mask2)
 
             # === Update Adversary 1 (belief about player 2) ===
             # Gradient: -Q_1^T @ π_1 + (1/τ_1) ∇D(p_1, π_2)
@@ -417,14 +442,14 @@ class MarkovRQESolver:
             grad_p1_penalty = self._penalty_gradient(p1, pi2, tau1)
             grad_p1 = grad_p1_payoff + grad_p1_penalty
             grad_p1 = torch.clamp(grad_p1, -50.0, 50.0)
-            p1 = self._mirror_step(p1, grad_p1, 1.0 / tau1, maximize=False)
+            p1 = self._mirror_step(p1, grad_p1, 1.0 / tau1, maximize=False, action_mask=mask2)
 
             # === Update Adversary 2 (belief about player 1) ===
             grad_p2_payoff = -torch.bmm(Q2.transpose(1, 2), pi2.unsqueeze(-1)).squeeze(-1)
             grad_p2_penalty = self._penalty_gradient(p2, pi1, tau2)
             grad_p2 = grad_p2_payoff + grad_p2_penalty
             grad_p2 = torch.clamp(grad_p2, -50.0, 50.0)
-            p2 = self._mirror_step(p2, grad_p2, 1.0 / tau2, maximize=False)
+            p2 = self._mirror_step(p2, grad_p2, 1.0 / tau2, maximize=False, action_mask=mask1)
 
             # Safety check: ensure valid probability distributions
             pi1 = torch.nan_to_num(pi1, nan=1.0/A1)
@@ -453,7 +478,8 @@ class MarkovRQESolver:
         policy: torch.Tensor,
         gradient: torch.Tensor,
         reg_coef: float,
-        maximize: bool = True
+        maximize: bool = True,
+        action_mask: torch.Tensor = None
     ) -> torch.Tensor:
         """
         Mirror descent step with entropy regularization.
@@ -462,6 +488,13 @@ class MarkovRQESolver:
         For minimization: π_new ∝ π_old · exp(-gradient / reg_coef)
 
         Uses log-domain computation for numerical stability.
+
+        Args:
+            policy: Current policy [batch, A]
+            gradient: Gradient [batch, A]
+            reg_coef: Regularization coefficient (epsilon)
+            maximize: Whether to maximize (True) or minimize (False)
+            action_mask: Optional mask [batch, A], 1 = valid, 0 = invalid
         """
         sign = 1.0 if maximize else -1.0
         log_policy = torch.log(policy + 1e-10)
@@ -471,6 +504,11 @@ class MarkovRQESolver:
         update = torch.clamp(update, -50.0, 50.0)  # Prevent exp overflow
 
         log_policy_new = log_policy + update
+
+        # Apply action mask: set invalid actions to -inf before softmax
+        if action_mask is not None:
+            log_policy_new = log_policy_new.masked_fill(action_mask == 0, float('-inf'))
+
         return F.softmax(log_policy_new, dim=-1)
 
     def _penalty_gradient(

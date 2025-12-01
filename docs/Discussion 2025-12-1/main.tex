@@ -1,0 +1,163 @@
+\documentclass[9pt]{beamer}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{tikz}
+\usepackage{tabularx}
+\usetheme{CleanEasy}
+
+% Set graphics path to see images in results/ and its subdirectories
+\graphicspath{{../../results/}}
+
+\title{RL Final}
+\subtitle{Team 23}
+\author{PH Lai \and YH Wu \and CC Hsu}
+\date{\today}
+
+\begin{document}
+
+\frame{\titlepage}
+
+\begin{frame}{Main Goal}
+    \begin{center}
+        \Large
+        Design a Multi-Agent Reinforcement Learning algorithm that converges to a \textbf{Risk-Averse Quantal Response Equilibrium (RQE)}.
+    \end{center}
+\end{frame}
+
+\begin{frame}{Formal Definition of RQE}
+    \begin{block}{Definition 5 (Mazumdar et al., 2025)}
+        A \textbf{Risk-Averse Quantal Response Equilibrium (RQE)} is a joint strategy $\pi^* \in \mathcal{P}$ such that for each player $i$:
+        \[
+            \tilde{f}_i(\pi_i^*, \pi_{-i}^*) \leq \tilde{f}_i(\pi_i, \pi_{-i}^*) \quad \forall \pi_i \in \Delta_{A_i}
+        \]
+    \end{block}
+    \vspace{0.2em}
+    This equilibrium exists in a modified game where each player's cost $\tilde{f}_i$ is their risk-adjusted cost $f_i$ plus a penalty for deviating from bounded rationality:
+    \[
+    \tilde{f}_i(\pi_i, \pi_{-i}) = \underbrace{f_i(\pi_i, \pi_{-i})}_{\text{Risk-Averse Cost}} + \underbrace{\varepsilon_i \nu_i(\pi_i)}_{\text{Bounded Rationality}}
+    \]
+    where $\nu_i$ is a strictly convex regularizer.
+\end{frame}
+
+\begin{frame}{Motivation: Why RQE?}
+    \begin{itemize}
+        \item \textbf{Tractability:} Standard solutions like Nash Equilibrium are often computationally intractable. RQE provides a tractable alternative.
+        \vspace{1em}
+        \item \textbf{Realism:} RQE is inspired by behavioral economics, creating agents that better model human-like decision-making by accounting for risk aversion and imperfect optimization.
+        \vspace{1em}
+        \item \textbf{Applications:} These properties are valuable in real-world strategic interactions, including \textbf{autonomous driving}, \textbf{finance}, and decentralized control of the \textbf{power grid}.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Explaining RQE}
+    \Large
+    \begin{center}
+        \textbf{RQE = Risk Aversion + Bounded Rationality}
+    \end{center}
+    \vspace{1em}
+    RQE combines two key concepts from behavioral economics:
+    \begin{itemize}
+        \item<1-> \textbf{Risk Aversion:} Agents prefer "safer" outcomes and may avoid high-risk, high-reward paths. We model this using a \textbf{convex risk measure}.
+        \vspace{1em}
+        \item<2-> \textbf{Bounded Rationality:} Agents are not perfect optimizers; they make mistakes and explore. We model this using an \textbf{entropy regularizer}.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Measuring Convergence: Risk-Averse NashConv}
+    Standard NashConv is not the right metric for RQE. Instead, we use a generalized version called \textbf{Risk-Averse NashConv (RA-NashConv)}.
+    \begin{itemize}
+        \item It still measures the collective "regret," but it's a special kind of regret.
+        \vspace{1em}
+        \item \textbf{Risk-Averse Regret}: How much more \textit{risk-adjusted utility} an agent could get by unilaterally changing its policy.
+        \vspace{1em}
+        \item This correctly measures the incentive to deviate for risk-averse, boundedly-rational agents. Our goal is to minimize this value.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Formal Definition of RA-NashConv}
+    First, we define the \textbf{Risk-Averse Regret} for player $i$ as the gain they get from switching to a risk-averse best-response policy $\pi'_i$:
+    \[
+    \widehat{\delta}_i^{\mathrm{RA}}(\pi) = \widehat{J}_i^{\mathrm{RA}}(\pi'_i, \pi_{-i}) - \widehat{J}_i^{\mathrm{RA}}(\pi_i, \pi_{-i})
+    \]
+    where $\widehat{J}_i^{\mathrm{RA}}$ is the estimated risk-averse objective function.
+    \vspace{1em}
+
+    The \textbf{Risk-Averse NashConv} is the sum of these regrets over all players:
+    \[
+    \mathrm{RA-NashConv}(\pi) = \sum_{i=1}^n \widehat{\delta}_i^{\mathrm{RA}}(\pi)
+    \]
+\end{frame}
+
+
+
+\begin{frame}{The Environment: Multi-Agent Cliff Walk}
+    \begin{itemize}
+        \item A grid world where agents must navigate to a goal while avoiding a "cliff".
+        \vspace{1em}
+        \item \textbf{Multi-Agent Risk}: When agents are close, the environment becomes more stochastic, increasing the risk of falling off the cliff.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Effect of Risk Aversion ($\tau$) on Solver Trajectories}
+    \begin{columns}[T] % T option aligns columns at the top
+        % Column 1: Low Risk Aversion
+        \begin{column}{.33\textwidth}
+            \centering
+            \includegraphics[width=\linewidth]{rqe_solver/rqe_trajectory_annotated_tau0.9_0.9_eps2.0_2.0_stoch.png}
+            \vspace{0.5em}
+            \small{\textbf{Low Risk} ($\tau=0.9$)}
+        \end{column}
+        % Column 2: Medium Risk Aversion
+        \begin{column}{.33\textwidth}
+            \centering
+            \includegraphics[width=\linewidth]{rqe_solver/rqe_trajectory_annotated_tau1.0_1.0_eps1.0_1.0_stoch.png}
+            \vspace{0.5em}
+            \small{\textbf{Medium Risk} ($\tau=1.0$)}
+        \end{column}
+        % Column 3: High Risk Aversion
+        \begin{column}{.33\textwidth}
+            \centering
+            \includegraphics[width=\linewidth]{rqe_solver/rqe_trajectory_annotated_tau10.0_10.0_eps0.1_0.1_stoch.png}
+            \vspace{0.5em}
+            \small{\textbf{High Risk} ($\tau=10.0$)}
+        \end{column}
+    \end{columns}
+    \vfill
+\end{frame}
+
+\begin{frame}{Our Implementation: Deep RQE Q-Learning}
+    \begin{center}
+        \textbf{How It Works:}
+    \end{center}
+    \begin{enumerate}
+        \item Each agent learns a deep \textbf{Q-Network} which outputs a full payoff matrix for the current state.
+        \vspace{0.5em}
+        \item At each decision step, the agents feed their learned payoff matrices into the \textbf{RQE Solver}.
+        \vspace{0.5em}
+        \item The solver computes the risk-averse equilibrium policy for the current state.
+        \vspace{0.5em}
+        \item Agents then select actions based on this computed equilibrium policy.
+    \end{itemize}
+    \begin{center}
+        \includegraphics[width=0.7\linewidth]{deep_rqe_cliffwalk/tau[1.0, 1.0]_eps[0.5, 0.5]_20251128_163001/value_function.png}
+    \end{center}
+\end{frame}
+
+\begin{frame}{Our Implementation: RQE-MAPPO}
+    \begin{center}
+        \textbf{How It Works:}
+    \end{center}
+    \begin{enumerate}
+        \item<1-> Learn return distribution with a \textbf{Distributional Critic}.
+        \item<2-> Calculate \textbf{Risk-Averse Value} ($V_{RA}$) from the distribution.
+        \item<3-> Compute \textbf{Risk-Aware Advantage} ($\hat{A}_{RA}$) using $V_{RA}$.
+        \item<4-> Update actor with PPO using the risk-aware advantage: $\mathcal{L}_{\text{PPO}}(\hat{A}_{RA})$.
+    \end{enumerate}
+    \begin{center}
+        \includegraphics[width=0.7\linewidth]{rqe_mappo_cliffwalk/tau[0.01, 0.02]_eps[50.0, 100.0]_20251128_162124/value_function.png}
+    \end{center}
+\end{frame}
+
+\end{document}

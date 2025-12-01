@@ -386,10 +386,10 @@ def main():
     # Load model based on type
     if args.model_type == "rqe_mappo":
         agents, config = load_rqe_mappo_checkpoint(args.checkpoint)
-        device = config.device
+        device = agents.device
     elif args.model_type == "true_rqe_mappo":
         agents, config = load_true_rqe_mappo_checkpoint(args.checkpoint)
-        device = config.device
+        device = agents.device
     elif args.model_type == "deep_rqe":
         agents, config, device = load_deep_rqe_checkpoint(args.checkpoint)
     else:

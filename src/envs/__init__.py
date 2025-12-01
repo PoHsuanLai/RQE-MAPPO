@@ -1,4 +1,3 @@
-from .pettingzoo_wrapper import PettingZooWrapper, make_env
-from .traffic_grid import TrafficGridEnv
+from .cliff_walk import CliffWalkEnv, CliffWalkPettingZoo, env_creator
 
-__all__ = ["PettingZooWrapper", "make_env", "TrafficGridEnv"]
+__all__ = ["CliffWalkEnv", "CliffWalkPettingZoo", "env_creator"]
